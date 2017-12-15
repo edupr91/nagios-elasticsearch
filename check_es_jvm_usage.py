@@ -18,6 +18,9 @@ class ESJVMHealthCheck(NagiosCheck):
 
         self.add_option('H', 'host', 'host', 'The cluster to check')
         self.add_option('P', 'port', 'port', 'The ES port - defaults to 9200')
+        self.add_option('N', 'node', 'node',
+                        'The node member of the cluster to check'
+                        ' - Must be an IP Address')
         self.add_option('C', 'critical_threshold', 'critical_threshold',
                         'The level at which we throw a CRITICAL alert'
                         ' - defaults to 97% of the JVM setting')
@@ -28,12 +31,16 @@ class ESJVMHealthCheck(NagiosCheck):
     def check(self, opts, args):
         host = opts.host
         port = int(opts.port or '9200')
+        node = opts.node
         critical = int(opts.critical_threshold or '97')
         warning = int(opts.warning_threshold or '90')
-
         try:
-            response = urllib2.urlopen(r'http://%s:%d/_nodes/stats/jvm'
-                                       % (host, port))
+            if node is None:
+               response = urllib2.urlopen(r'http://%s:%d/_nodes/stats/jvm'
+                                         % (host, port))
+            else:
+               response = urllib2.urlopen(r'http://%s:%d/_nodes/%s/stats/jvm'
+                                         % (host, port, node))
         except urllib2.HTTPError, e:
             raise Status('unknown', ("API failure", None,
                                      "API failure:\n\n%s" % str(e)))
@@ -41,7 +48,6 @@ class ESJVMHealthCheck(NagiosCheck):
             raise Status('critical', (e.reason))
 
         response_body = response.read()
-
         try:
             nodes_jvm_data = json.loads(response_body)
         except ValueError:
@@ -49,43 +55,51 @@ class ESJVMHealthCheck(NagiosCheck):
 
         criticals = 0
         critical_details = []
+        critical_message = []
         warnings = 0
         warning_details = []
+        warning_message = []
+        message = []
 
         nodes = nodes_jvm_data['nodes']
+        if len(nodes) == 0:
+            raise Status('unknown', ("The Node %s is not a cluster member" % node,))
+
         for node in nodes:
             jvm_percentage = nodes[node]['jvm']['mem']['heap_used_percent']
             node_name = nodes[node]['host']
             if int(jvm_percentage) >= critical:
                 criticals = criticals + 1
-                critical_details.append("%s currently running at %s%% JVM mem "
-                                        % (node_name, jvm_percentage))
+                critical_details.append("%s=%s%% " % (node_name, jvm_percentage))
+                critical_message.append("%s=%s%%;%s;%s" % (node_name,jvm_percentage, warning, critical))
             elif (int(jvm_percentage) >= warning and
                   int(jvm_percentage) < critical):
                 warnings = warnings + 1
-                warning_details.append("%s currently running at %s%% JVM mem "
-                                       % (node_name, jvm_percentage))
-
+                warning_details.append("%s=%s%% " % (node_name, jvm_percentage))
+                warning_message.append("%s=%s%%;%s;%s" % (node_name,jvm_percentage, warning, critical))
+            else:
+                message.append("%s=%s%%;%s;%s" % (node_name,jvm_percentage, warning, critical))
         if criticals > 0:
             raise Status("Critical",
-                         "There are '%s' node(s) in the cluster that have "
-                         "breached the %% JVM heap usage critical threshold "
-                         "of %s%%. They are:\r\n%s"
+                         "The following node(s) in the cluster have breached "
+                         "the %% JVM mem usage critical threshold of %s%%: %s | %s"
                          % (
-                             criticals,
                              critical,
-                             str("\r\n".join(critical_details))
+                             str(" ".join(critical_details)),
+                             str(" ".join(critical_message))
                              ))
         elif warnings > 0:
             raise Status("Warning",
-                         "There are '%s' node(s) in the cluster that have "
-                         "breached the %% JVM mem usage warning threshold of "
-                         "%s%%. They are:\r\n%s"
-                         % (warnings, warning,
-                            str("\r\n".join(warning_details))))
+                         "The following node(s) in the cluster have breached"
+                         "the %% JVM mem usage warning threshold of %s%%: %s | %s"
+                         % (
+                             warning,
+                             str(" ".join(warning_details)),
+                             str(" ".join(warning_message))
+                         ))
         else:
             raise Status("OK", "All nodes in the cluster are currently below "
-                         "the % JVM mem warning threshold")
+                         "the %% JVM mem warning threshold | %s" % (str(" ".join(message))) )
 
 if __name__ == "__main__":
     ESJVMHealthCheck().run()
